@@ -27,7 +27,8 @@ def route_webhook():
     expected_delta = 0
     data = json.loads(request.data.decode('utf8'))
     settings.log.debug('webhook type received %s' % data['type'])
-
+    entities_payee_id = None
+    subcategory_id = None
     if data['type'] == 'transaction.created':
 
         # Sync the account so we get the latest payees
@@ -44,6 +45,19 @@ def route_webhook():
         # Work out the Payee Name
         if data['data'].get('merchant'):
             payee_name = data['data']['merchant']['name']
+
+            # Get the defaults for this payee based on previously imported data
+            previous_transaction = ynab_client.findPreviousTransaction(payee_name)
+            if not previous_transaction is None:
+		settings.log.debug('A previous transaction for the payee %s has been found' % payee_name)
+                entities_payee_id = previous_transaction.entities_payee.id
+                subcategory = previous_transaction.entities_subcategory
+                
+                # Include the category used, as long as it's not a split category
+                if not subcategory is None:
+                    if not subcategory.name == 'Split (Multiple Categories)...':
+                        settings.log.debug('We have identified the following category %s as a good default for this payee' % subcategory.name)
+                        subcategory_id = subcategory.id
         else:
             # This is a p2p transaction
             if data['data'].get('counterparty'):
@@ -57,9 +71,10 @@ def route_webhook():
                 payee_name = 'Unknown Payee'
 
         # If we are creating the payee, then we need to increase the delta
-        if not ynab_client.payeeexists(payee_name):
-            settings.log.debug('payee does not exist, will create %s' % payee_name)
-            expected_delta += 1
+        if entities_payee_id is None:
+            if not ynab_client.payeeexists(payee_name):
+                settings.log.debug('payee does not exist, will create %s' % payee_name)
+                expected_delta += 1
 
         # Suggested Tags
         suggested_tags = ''
@@ -77,7 +92,8 @@ def route_webhook():
             local_currency = '(%s %s)' % (data['data']['local_currency'], (abs(data['data']['local_amount']) / 100))
 
         # Either create or get the payee
-        entities_payee_id = ynab_client.getpayee(payee_name).id
+        if entities_payee_id is None:
+            entities_payee_id = ynab_client.getpayee(payee_name).id
 
         # Create the Transaction
         expected_delta += 1
@@ -93,6 +109,9 @@ def route_webhook():
             memo="%s %s %s" % (emoji, suggested_tags, local_currency),
             source="Imported"
         )
+
+        if not subcategory_id is None:
+            transaction.entities_subcategory_id  = subcategory_id
 
         # If this transaction is in our local currency, then just automatically mark it as cleared.
         # Otherwise, we want to leave it as uncleared as the value may change once it settles
